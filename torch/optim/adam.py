@@ -510,19 +510,34 @@ def _single_tensor_adam(
                 max_exp_avg_sqs[i].copy_(torch.maximum(max_exp_avg_sq, exp_avg_sq))
 
                 # Uses the max. for normalizing running avg. of gradient
-                # Folds in (admittedly ugly) 1-elem step_size math here to avoid extra param-set-sized read+write
-                # (can't fold it into addcdiv_ below because addcdiv_ requires value is a Number, not a Tensor)
-                denom = (
-                    max_exp_avg_sqs[i].sqrt() / (bias_correction2_sqrt * step_size_neg)
-                ).add_(eps / step_size_neg)
+                denom = max_exp_avg_sqs[i].sqrt()
             else:
-                denom = (
-                    exp_avg_sq.sqrt() / (bias_correction2_sqrt * step_size_neg)
-                ).add_(eps / step_size_neg)
+                denom = exp_avg_sq.sqrt()
 
+            is_float16 = denom.dtype is torch.float16
             if differentiable:
-                param.addcdiv_(exp_avg.clone(), denom)
+                exp_avg_for_update = exp_avg.clone()
+                if is_float16:
+                    denom = denom.float()
+                    exp_avg_for_update = exp_avg_for_update.float()
+                denom = denom / bias_correction2_sqrt
+                denom = denom + eps
+                param.addcdiv_(exp_avg_for_update * step_size_neg, denom)
+            elif is_float16:
+                # float16 cannot represent the default eps before it is scaled
+                # by the step size, so keep the denominator math in fp32.
+                denom = denom.float()
+                denom.div_(bias_correction2_sqrt)
+                denom.add_(eps)
+                denom.div_(step_size_neg)
+                param.addcdiv_(exp_avg, denom)
             else:
+                # Build the folded denominator's numerator before dividing by
+                # the step size. This keeps the numerator nonzero for untouched
+                # rows, so lr=0 gives an infinite denominator instead of
+                # 0 / -0 -> NaN.
+                denom.add_(eps * bias_correction2_sqrt)
+                denom.div_(bias_correction2_sqrt * step_size_neg)
                 param.addcdiv_(exp_avg, denom)
         else:
             step = _get_value(step_t)
@@ -761,6 +776,10 @@ def _multi_tensor_adam(
             else:
                 exp_avg_sq_sqrt = torch._foreach_sqrt(device_exp_avg_sqs)
 
+            if device_params[0].dtype is torch.float16:
+                # Match the single-tensor path: preserve eps in fp32 for
+                # float16 before folding in the capturable step size.
+                exp_avg_sq_sqrt = [t.float() for t in exp_avg_sq_sqrt]
             torch._foreach_div_(exp_avg_sq_sqrt, bias_correction2_sqrt)
             torch._foreach_add_(exp_avg_sq_sqrt, eps)
             torch._foreach_div_(exp_avg_sq_sqrt, step_size)
