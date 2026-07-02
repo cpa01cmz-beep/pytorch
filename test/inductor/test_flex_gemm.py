@@ -735,7 +735,7 @@ class TestFlexGemmRuntime(FlexGemmTestCase):
                 self.captured_tuple_aux_epilogue,
                 name,
                 out=out,
-                aux_out=aux,
+                aux_outs=(aux,),
                 epilogue_args=(col_bias, row_scale, tile_bias),
                 epilogue_arg_kinds=("col", "row", "tile"),
                 config_key=config_key,
@@ -810,7 +810,7 @@ class TestFlexGemmRuntime(FlexGemmTestCase):
             "test_flex_gemm_tuple_aux",
             out_dtype=torch.float32,
             out=out,
-            aux_out=aux,
+            aux_outs=(aux,),
         )
 
         self.assertIs(actual, out)
@@ -822,9 +822,9 @@ class TestFlexGemmEpilogueHOP(FlexGemmTestCase):
     def assertFlexGemmGeneratedCode(self, code, *checks):
         file_check = (
             FileCheck()
-            .check(
-                "from torch._inductor.kernel.flex_gemm.runtime import gemm_epilogue as flex_gemm_epilogue"
-            )
+            .check("from torch._inductor.kernel.flex_gemm.runtime import (")
+            .check("FlexGemmRuntimeLocalReducePlan")
+            .check("gemm_epilogue as flex_gemm_epilogue")
             .check("flex_gemm_epilogue(")
         )
         for check in checks:
@@ -957,36 +957,6 @@ class TestFlexGemmEpilogueHOP(FlexGemmTestCase):
 
         with self.assertRaisesRegex(Exception, "currently support only aten.mm"):
             torch.compile(addmm_fn, backend="inductor", fullgraph=True)(bias, a, b)
-
-    def test_generated_tuple_aux_rejects_shape_mismatch(self):
-        def fn(a, b):
-            return flex_gemm(
-                torch.mm,
-                (a, b),
-                lambda acc: (acc.relu(), acc.sum(dim=1, keepdim=True)),
-                kernel_options={"backend": "QUACK"},
-            )
-
-        a = torch.randn(4, 8)
-        b = torch.randn(8, 5)
-
-        with self.assertRaisesRegex(Exception, "aux output shapes to match"):
-            torch.compile(fn, backend="inductor", fullgraph=True)(a, b)
-
-    def test_generated_tuple_aux_rejects_multiple_aux_outputs(self):
-        def fn(a, b):
-            return flex_gemm(
-                torch.mm,
-                (a, b),
-                lambda acc: (acc.relu(), acc + 1, acc * 2),
-                kernel_options={"backend": "QUACK"},
-            )
-
-        a = torch.randn(4, 8)
-        b = torch.randn(8, 5)
-
-        with self.assertRaisesRegex(Exception, "at most one aux output"):
-            torch.compile(fn, backend="inductor", fullgraph=True)(a, b)
 
     @skipIfNoCuteDSL
     @unittest.skipIf(not TEST_CUDA, "CUDA required")
@@ -1340,7 +1310,7 @@ class TestFlexGemmEpilogueHOP(FlexGemmTestCase):
             a.shape[1],
         )
         torch.testing.assert_close(aux, expected_aux)
-        self.assertFlexGemmGeneratedCode(code, "aux_out=")
+        self.assertFlexGemmGeneratedCode(code, "aux_outs=")
 
     @skipIfNoCuteDSL
     @unittest.skipIf(not TEST_CUDA, "CUDA required")
@@ -1551,7 +1521,7 @@ class TestFlexGemmEpilogueHOP(FlexGemmTestCase):
             code,
             "epilogue_args=",
             "epilogue_arg_kinds=('col', 'row', 'tile')",
-            "aux_out=",
+            "aux_outs=",
         )
 
     @skipIfNoCuteDSL
@@ -1627,7 +1597,7 @@ class TestFlexGemmEpilogueHOP(FlexGemmTestCase):
             )
 
         self.assertTupleAuxMatchesReference(actual, aux, a, b, epilogue_fn)
-        self.assertFlexGemmGeneratedCode(code, "aux_out=")
+        self.assertFlexGemmGeneratedCode(code, "aux_outs=")
 
     @skipIfNoCuteDSL
     @unittest.skipIf(not TEST_CUDA, "CUDA required")
